@@ -1,16 +1,16 @@
 [build-system]
-requires    = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires       = ["setuptools>=61.0", "wheel"]
+build-backend  = "setuptools.build_meta"
 
 [project]
-name = "a2a-cli"
-version = "0.1.1"
-description = "Command-line client for the A2A (Agent-to-Agent) Protocol"
-readme = "README.md"
-requires-python = ">=3.11"
-license = {text = "MIT"}
-authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+name             = "a2a-cli"
+version          = "0.1.2"
+description      = "Command-line client for the A2A (Agent-to-Agent) Protocol"
+readme           = "README.md"
+requires-python  = ">=3.11"
+license          = { text = "MIT" }
+authors          = [
+    { name = "Your Name", email = "your.email@example.com" }
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "a2a-json-rpc>=0.1.0",
+    "a2a-json-rpc>=0.1.1",
     "httpx>=0.28.1",
     "prompt-toolkit>=3.0.51",
     "pydantic>=2.11.3",
@@ -36,16 +36,27 @@ dev = [
     "pytest>=8.3.5",
 ]
 
+[project.scripts]
+a2a-cli = "a2a_cli.cli:app"
+
+[tool.setuptools]
+# include your non-Python files (resources, configs, etc.) in wheels
+include-package-data = true
+
+[tool.setuptools.package-data]
+# bundle everything under src/a2a_cli/resources
+"a2a_cli" = [
+  "resources/*.json",
+  "resources/*.txt",
+]
+
 [tool.setuptools.packages.find]
 where   = ["src"]
 include = ["a2a_cli*"]
 
-[project.scripts]
-a2a-cli = "a2a_cli.cli:app"
-
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "-v"
-asyncio_mode = "strict"
-asyncio_default_fixture_loop_scope = "function"
+testpaths                               = ["tests"]
+pythonpath                              = ["src"]
+addopts                                 = "-v"
+asyncio_mode                            = "strict"
+asyncio_default_fixture_loop_scope      = "function"
