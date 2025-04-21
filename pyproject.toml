@@ -4,13 +4,13 @@ build-backend  = "setuptools.build_meta"
 
 [project]
 name             = "a2a-cli"
-version          = "0.1.2"
+version          = "0.1.3"
 description      = "Command-line client for the A2A (Agent-to-Agent) Protocol"
 readme           = "README.md"
 requires-python  = ">=3.11"
 license          = { text = "MIT" }
 authors          = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "Chris Hay", email = "your.email@example.com" }
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "a2a-json-rpc>=0.1.1",
+    "a2a-json-rpc>=0.1.3",
     "httpx>=0.28.1",
     "prompt-toolkit>=3.0.51",
     "pydantic>=2.11.3",
