@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.text import Text
 
 # Import the registration function
 from a2a_cli.chat.commands import register_command
@@ -229,72 +230,6 @@ async def cmd_disconnect(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     print(f"[green]Disconnected from {base_url}[/green]")
     return True
 
-
-async def cmd_server(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
-    """
-    Display current server connection information.
-
-    Usage: /server
-    """
-    console = Console()
-
-    # Check if connected
-    base_url = context.get("base_url")
-    if not base_url:
-        print("[yellow]Not connected to any server. Use /connect to connect.[/yellow]")
-        return True
-
-    # Find server name if available
-    server_name = "Custom URL"
-    server_names = context.get("server_names", {})
-    for name, url in server_names.items():
-        if url.rstrip("/") == base_url.rstrip("/"):
-            server_name = name
-            break
-
-    # Get agent info if available
-    agent_info = context.get("agent_info", {})
-    agent_name = agent_info.get("name", "Unknown")
-    agent_version = agent_info.get("version", "Unknown")
-
-    # Create table for server info
-    table = Table(title="Server Connection")
-    table.add_column("Property", style="green")
-    table.add_column("Value")
-
-    table.add_row("Server Name", server_name)
-    table.add_row("Base URL", base_url)
-    table.add_row("RPC Endpoint", base_url.rstrip("/") + "/rpc")
-    table.add_row("Events Endpoint", base_url.rstrip("/") + "/events")
-
-    # Add agent info if available
-    if agent_info:
-        table.add_row("Agent Name", agent_name)
-        table.add_row("Agent Version", agent_version)
-
-    # Check if client is connected
-    client_status = "[green]Connected[/green]" if context.get("client") else "[red]Disconnected[/red]"
-    table.add_row("Client Status", client_status)
-
-    # Check if streaming client is connected
-    streaming_status = "[green]Available[/green]" if context.get("streaming_client") else "[yellow]Not initialized[/yellow]"
-    table.add_row("Streaming Status", streaming_status)
-
-    console.print(table)
-
-    # Show capabilities if available
-    if agent_info and "capabilities" in agent_info:
-        caps = agent_info["capabilities"]
-        if caps:
-            caps_table = Table(title="Agent Capabilities")
-            caps_table.add_column("Capability", style="cyan")
-            for cap in caps:
-                caps_table.add_row(cap)
-            console.print(caps_table)
-
-    return True
-
-
 async def cmd_servers(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     """
     List all available preconfigured servers.
@@ -494,7 +429,6 @@ async def cmd_remove_server(cmd_parts: List[str], context: Dict[str, Any]) -> bo
 # Register all commands in this module
 register_command("/connect", cmd_connect)
 register_command("/disconnect", cmd_disconnect)
-register_command("/server", cmd_server)
 register_command("/servers", cmd_servers)
 register_command("/use", cmd_use)
 register_command("/load_config", cmd_load_config)
