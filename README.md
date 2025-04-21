@@ -31,13 +31,13 @@ pip install -e .
 
 ```bash
 # Start in interactive chat mode
-a2a chat
+uvx a2a-cli chat
 
 # Send a task to a server
-a2a send "Hello, agent" --server http://localhost:8000
+uvx a2a-cli --server http://localhost:8000 send "Hello, agent"
 
 # Watch a task's progress
-a2a watch <task-id>
+uvx a2a-cli watch <task-id>
 ```
 
 ## Chat Mode
@@ -45,7 +45,7 @@ a2a watch <task-id>
 The interactive chat mode provides a rich interface for interacting with A2A agents:
 
 ```bash
-a2a chat
+uvx a2a-cli chat
 ```
 
 In chat mode, you can:
@@ -72,13 +72,13 @@ A2A CLI can also be used as a traditional command-line tool:
 
 ```bash
 # Send a task and wait for the result
-a2a send "Generate a list of 5 movie recommendations" --wait
+uvx a2a-cli send "Generate a list of 5 movie recommendations" --wait
 
 # Get details about a specific task
-a2a get <task-id>
+uvx a2a-cli get <task-id>
 
 # Cancel a running task
-a2a cancel <task-id>
+uvx a2a-cli cancel <task-id>
 ```
 
 ## Configuration
@@ -98,7 +98,7 @@ A2A CLI supports configuration files to manage multiple server connections. Crea
 Then use them by name:
 
 ```bash
-a2a chat --server local
+uvx a2a-cli --server local chat 
 ```
 
 Or in chat mode:
