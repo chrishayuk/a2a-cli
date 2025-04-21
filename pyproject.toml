@@ -1,0 +1,51 @@
+[build-system]
+requires    = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2a-cli"
+version = "0.1.1"
+description = "Command-line client for the A2A (Agent-to-Agent) Protocol"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "a2a-json-rpc>=0.1.0",
+    "httpx>=0.28.1",
+    "prompt-toolkit>=3.0.51",
+    "pydantic>=2.11.3",
+    "rich>=14.0.0",
+    "typer>=0.15.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "anyio>=4.9.0",
+    "pytest-asyncio>=0.26.0",
+    "pytest>=8.3.5",
+]
+
+[tool.setuptools.packages.find]
+where   = ["src"]
+include = ["a2a_cli*"]
+
+[project.scripts]
+a2a-cli = "a2a_cli.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
