@@ -71,7 +71,7 @@ class JSONRPCHTTPClient(JSONRPCTransport):
                 if line.startswith("data:"):
                     first = json.loads(line.removeprefix("data:").strip())
                     break
-            else:  # pragma: no cover – should never happen
+            else:  # pragma: no cover - should never happen
                 raise JSONRPCError(message="Empty SSE stream")
 
             if first.get("error"):

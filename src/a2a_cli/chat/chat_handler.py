@@ -64,7 +64,7 @@ async def auto_connect(ui_manager, chat_context):
         return False
 
 
-async def handle_chat_mode(base_url=None, config_file=None):
+async def handle_chat_mode(base_url=None, config_file=None, session_id=None):
     """
     Enter interactive chat mode for the A2A client.
 
@@ -79,8 +79,8 @@ async def handle_chat_mode(base_url=None, config_file=None):
     exit_code = 0
 
     try:
-        # 1) Initialize context
-        chat_context = ChatContext(base_url, config_file)
+        # 1) Initialize context - pass the shared session_id
+        chat_context = ChatContext(base_url, config_file, session_id=session_id)
         if not await chat_context.initialize():
             print("[red]Failed to initialize chat context.[/red]")
             return False

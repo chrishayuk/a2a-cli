@@ -107,7 +107,7 @@ class ChatUIManager:
             if self.task_running:
                 if not self.interrupt_requested:
                     self.interrupt_requested = True
-                    print("\n[yellow]Interrupt requested – waiting for "
+                    print("\n[yellow]Interrupt requested - waiting for "
                           "current task to complete...[/yellow]")
                     self._interrupt_now()
                     return

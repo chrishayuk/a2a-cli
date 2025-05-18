@@ -10,6 +10,7 @@ import logging
 import os
 import json
 from typing import Dict, Any, Optional, List
+from uuid import uuid4
 
 # a2a client imports
 from a2a_cli.a2a_client import A2AClient
@@ -18,136 +19,122 @@ from a2a_json_rpc.spec import TaskQueryParams
 
 logger = logging.getLogger("a2a-client")
 
+
 class ChatContext:
-    """
-    Manages the state for the A2A client chat interface.
-    
-    Handles connection to the A2A server, client configuration,
-    and maintains shared state across components.
-    """
-    
-    def __init__(self, base_url: Optional[str] = None, config_file: Optional[str] = None):
+    """Holds all shared state for the interactive chat UI."""
+
+    # ------------------------------------------------------------------ #
+    # construction & initialisation                                      #
+    # ------------------------------------------------------------------ #
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        config_file: Optional[str] = None,
+        *,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Create a new chat context.
+
+        Parameters
+        ----------
+        base_url
+            Base URL of the A2A server. Defaults to *http://localhost:8000*.
+        config_file
+            Optional path to a JSON config with named servers.
+        session_id
+            The **process‑wide** UUID generated in *cli.py*.  Every task we
+            emit will carry exactly this value so the server can thread the
+            conversation.  If ``None`` we fall back to a fresh UUID (makes the
+            class usable in tests).
         """
-        Initialize the chat context.
-        
-        Args:
-            base_url: Optional base URL for the A2A server
-            config_file: Optional path to a configuration file
-        """
-        # Connection info
+        # Connection info ------------------------------------------------
         self.base_url = base_url or "http://localhost:8000"
         self.config_file = config_file
-        
-        # Client instances
-        self.client = None
-        self.streaming_client = None
-        
-        # State flags
+
+        # Shared conversation identifier ---------------------------------
+        self.session_id = session_id or uuid4().hex
+
+        # Client handles --------------------------------------------------
+        self.client: Optional[A2AClient] = None
+        self.streaming_client: Optional[A2AClient] = None
+
+        # Flags -----------------------------------------------------------
         self.exit_requested = False
         self.verbose_mode = False
         self.debug_mode = False
-        
-        # History
-        self.command_history = []
-        
-        # Server names (from config)
-        self.server_names = {}
-        
-        # Tasks
-        self.last_task_id = None
-    
+
+        # Misc state ------------------------------------------------------
+        self.command_history: List[str] = []
+        self.server_names: Dict[str, str] = {}  # name -> url (from config)
+        self.last_task_id: Optional[str] = None
+
+    # ------------------------------------------------------------------ #
+    # public API                                                         #
+    # ------------------------------------------------------------------ #
     async def initialize(self) -> bool:
-        """
-        Initialize the chat context and establish connections.
-        
-        Returns:
-            True if initialization was successful, False otherwise
-        """
-        # Load config if provided
+        """Load config (if any) **and** attempt to connect to the server."""
         if self.config_file:
             try:
                 self._load_config()
-            except Exception as e:
-                logger.error(f"Error loading config: {e}")
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Error loading config: %s", exc)
                 return False
-        
-        # Connect to the server
+
         try:
             await self._connect_to_server()
             return True
-        except Exception as e:
-            logger.error(f"Error connecting to server: {e}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error connecting to server: %s", exc)
             return False
-    
+
+    # ------------------------------------------------------------------ #
+    # private helpers                                                    #
+    # ------------------------------------------------------------------ #
     def _load_config(self) -> None:
-        """
-        Load configuration from file.
-        """
-        config_path = os.path.expanduser(self.config_file)
-        
+        """Read the JSON config file and populate *server_names*."""
+        config_path = os.path.expanduser(self.config_file)  # type: ignore[arg-type]
         if not os.path.exists(config_path):
-            logger.warning(f"Config file not found: {config_path}")
+            logger.warning("Config file not found: %s", config_path)
             return
-        
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-            
-            # Extract server names
-            self.server_names = config.get("servers", {})
-            logger.info(f"Loaded {len(self.server_names)} servers from config")
-            
-            # If a base URL is not specified and we have servers, use the first one
-            if not self.base_url and self.server_names:
-                first_server = next(iter(self.server_names.values()))
-                self.base_url = first_server
-                logger.info(f"Using first server from config: {self.base_url}")
-                
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON in config file: {config_path}")
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-    
-    async def _connect_to_server(self) -> None:
-        """
-        Establish connection to the A2A server.
-        """
-        rpc_url = self.base_url + "/rpc"
-        events_url = self.base_url + "/events"
-        
-        # Create standard HTTP client
-        try:
-            self.client = A2AClient.over_http(rpc_url)
-            
-            # Try a simple ping to verify connection
-            logger.debug(f"Testing connection to {rpc_url}...")
-            
+
+        with open(config_path, "r", encoding="utf-8") as fp:
             try:
-                # Create a proper TaskQueryParams object instead of a raw dict
-                params = TaskQueryParams(id="ping-test-000")
-                await self.client.get_task(params)
-            except JSONRPCError as e:
-                # This is expected - we just wanted to verify the server responds
-                if "not found" in str(e).lower():
-                    logger.info(f"Successfully connected to {self.base_url}")
-                else:
-                    # Some other error
-                    logger.warning(f"Connected but received unexpected error: {e}")
-            
-            # Create SSE client for streaming operations
-            self.streaming_client = A2AClient.over_sse(rpc_url, events_url)
-            
-        except Exception as e:
-            logger.error(f"Error connecting to server: {e}")
-            raise
-    
+                config = json.load(fp)
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON in config file: %s", config_path)
+                return
+
+        self.server_names = config.get("servers", {})
+        logger.info("Loaded %d servers from config", len(self.server_names))
+
+        if not self.base_url and self.server_names:
+            self.base_url = next(iter(self.server_names.values()))
+            logger.info("Using first server from config: %s", self.base_url)
+
+    async def _connect_to_server(self) -> None:
+        """Establish HTTP + SSE clients and perform a quick ping."""
+        rpc_url = f"{self.base_url.rstrip('/')}/rpc"
+        events_url = f"{self.base_url.rstrip('/')}/events"
+
+        # Plain HTTP client ----------------------------------------------
+        self.client = A2AClient.over_http(rpc_url)
+        logger.debug("Testing connection to %s…", rpc_url)
+        try:
+            await self.client.get_task(TaskQueryParams(id="ping-test-000"))
+        except JSONRPCError as exc:
+            if "not found" in str(exc).lower():
+                logger.info("Successfully connected to %s", self.base_url)
+            else:
+                logger.warning("Connected but ping produced: %s", exc)
+
+        # SSE / streaming client -----------------------------------------
+        self.streaming_client = A2AClient.over_sse(rpc_url, events_url)
+
+    # ------------------------------------------------------------------ #
+    # dictionary helpers for command system                              #
+    # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert the context to a dictionary for command handlers.
-        
-        Returns:
-            Dictionary representation of the context
-        """
+        """Return a plain dict snapshot of the mutable state."""
         return {
             "base_url": self.base_url,
             "client": self.client,
@@ -157,54 +144,44 @@ class ChatContext:
             "exit_requested": self.exit_requested,
             "command_history": self.command_history,
             "server_names": self.server_names,
-            "last_task_id": self.last_task_id
+            "last_task_id": self.last_task_id,
+            "session_id": self.session_id,
         }
-    
-    def update_from_dict(self, context_dict: Dict[str, Any]) -> None:
-        """
-        Update the context from a dictionary (after command execution).
-        
-        Args:
-            context_dict: Dictionary with updated context values
-        """
-        # Update connection info
-        if "base_url" in context_dict:
-            self.base_url = context_dict["base_url"]
-        
-        # Update clients
-        if "client" in context_dict:
-            self.client = context_dict["client"]
-        if "streaming_client" in context_dict:
-            self.streaming_client = context_dict["streaming_client"]
-        
-        # Update state flags
-        if "verbose_mode" in context_dict:
-            self.verbose_mode = context_dict["verbose_mode"]
-        if "debug_mode" in context_dict:
-            self.debug_mode = context_dict["debug_mode"]
-        if "exit_requested" in context_dict:
-            self.exit_requested = context_dict["exit_requested"]
-        
-        # Update history
-        if "command_history" in context_dict:
-            self.command_history = context_dict["command_history"]
-        
-        # Update server names
-        if "server_names" in context_dict:
-            self.server_names = context_dict["server_names"]
-        
-        # Update task info
-        if "last_task_id" in context_dict:
-            self.last_task_id = context_dict["last_task_id"]
-    
+
+    def update_from_dict(self, ctx: Dict[str, Any]) -> None:  # noqa: C901 - long but simple
+        """Apply updates coming back from command helpers."""
+        # Simple scalar fields -------------------------------------------
+        for key in (
+            "base_url",
+            "verbose_mode",
+            "debug_mode",
+            "exit_requested",
+            "last_task_id",
+        ):
+            if key in ctx:
+                setattr(self, key, ctx[key])
+
+        # Containers ------------------------------------------------------
+        if "command_history" in ctx:
+            self.command_history = list(ctx["command_history"])  # copy
+        if "server_names" in ctx:
+            self.server_names = dict(ctx["server_names"])
+
+        # Clients ---------------------------------------------------------
+        if "client" in ctx:
+            self.client = ctx["client"]
+        if "streaming_client" in ctx:
+            self.streaming_client = ctx["streaming_client"]
+
+        # Session-id is immutable on purpose - ignore any attempt to overwrite
+
+    # ------------------------------------------------------------------ #
+    # cleanup                                                             #
+    # ------------------------------------------------------------------ #
     async def close(self) -> None:
-        """
-        Close all connections and clean up resources.
-        """
-        # Close streaming client if available
+        """Close both transport layers, if they expose a .close()."""
         if self.streaming_client and hasattr(self.streaming_client.transport, "close"):
             await self.streaming_client.transport.close()
-        
-        # Close main client if available
+
         if self.client and hasattr(self.client.transport, "close"):
             await self.client.transport.close()

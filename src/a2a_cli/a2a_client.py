@@ -13,7 +13,7 @@ Key changes
   the caller always receives real spec objects.
 * Streaming loops for ``send_subscribe`` and ``resubscribe`` now use the
   helper and are identical apart from the initial RPC call.
-* No external behaviour changes – just correct artifact handling.
+* No external behaviour changes - just correct artifact handling.
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ class A2AClient:
         if "artifact" in evt:
             payload = {k: v for k, v in evt.items() if k != "type"}
             return TaskArtifactUpdateEvent.model_validate(payload)
-        return evt  # unknown – let the caller decide
+        return evt  # unknown - let the caller decide
 
     # ------------------------------------------------------------------ #
     # streaming helpers                                                  #
@@ -153,7 +153,7 @@ class A2AClient:
                 yield self._coerce_stream_event(raw_msg)
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("Error parsing stream event: %s", exc, exc_info=True)
-                # decide whether to swallow or re‑raise – swallow keeps the stream alive
+                # decide whether to swallow or re‑raise - swallow keeps the stream alive
 
     async def resubscribe(
         self, params: TaskQueryParams
