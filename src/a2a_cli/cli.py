@@ -9,11 +9,13 @@ running A2A server.
 
 May 2025
 ────────
-* **Session persistence** - a single random `session_id` is generated when the
+* Session persistence – a single random ``session_id`` is generated when the
   CLI starts and automatically attached to every task you send so the server
   can build real conversation memory.
-* **Cleaner logging flags** (`--debug`, `--quiet`, `--log-level`).
+* Cleaner logging flags (``--debug``, ``--quiet``, ``--log-level``).
 * Graceful terminal restore on Ctrl-C / signals.
+* **May 18, 2025:** streaming views now show every artifact the moment it
+  arrives (no more “last one wins”).
 """
 from __future__ import annotations
 
@@ -58,9 +60,8 @@ DEFAULT_HOST = "http://localhost:8000"
 RPC_SUFFIX = "/rpc"
 EVENTS_SUFFIX = "/events"
 
-# One session id for the entire CLI run - lets the server remember context
+# One session id for the entire CLI run – lets the server remember context
 CLI_SESSION_ID: str = uuid.uuid4().hex
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Logging helpers
@@ -124,15 +125,14 @@ for _sig in (signal.SIGINT, signal.SIGTERM) + (
 ):  # type: ignore[misc]
     signal.signal(_sig, _exit_handler)  # type: ignore[arg-type]
 
-
 # ────────────────────────────────────────────────────────────────────────────
 # Typer application
 # ────────────────────────────────────────────────────────────────────────────
-app = typer.Typer(help="A2A CLI - chat & task control for your A2A server")
+app = typer.Typer(help="A2A CLI – chat & task control for your A2A server")
 
 
 @app.callback(invoke_without_command=True)
-def _common(  # noqa: D401 - Typer callback
+def _common(  # noqa: D401 – Typer callback
     ctx: typer.Context,
     config_file: str = typer.Option("~/.a2a/config.json", help="Config JSON"),
     server: str | None = typer.Option(None, help="Server URL or name from config"),
@@ -140,7 +140,7 @@ def _common(  # noqa: D401 - Typer callback
     quiet: bool = typer.Option(False, help="Silence non-errors"),
     log_level: str = typer.Option("INFO", help="Log level when not in --debug/--quiet"),
 ):
-    """Global options. If no sub-command is given we drop into chat mode."""
+    """Global options.  If no sub-command is given we drop into chat mode."""
     _setup_logging(debug, quiet, log_level)
 
     cfg_path = os.path.expanduser(config_file)
@@ -164,7 +164,6 @@ def _common(  # noqa: D401 - Typer callback
         finally:
             restore_terminal()
         raise typer.Exit()
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # send command
@@ -201,6 +200,7 @@ def send(
     if not wait:
         return
 
+    # ── streaming view ────────────────────────────────────────────────
     sse_client = A2AClient.over_sse(rpc_url, events_url)
 
     async def _stream() -> None:
@@ -208,15 +208,24 @@ def send(
         from rich.text import Text
 
         console = Console()
+        status_line = ""
+        artifact_lines: list[str] = []
+
         with Live("", refresh_per_second=4, console=console) as live:
             async for evt in sse_client.send_subscribe(params):
                 if isinstance(evt, TaskStatusUpdateEvent):
-                    live.update(Text.from_markup(format_status_event(evt)))
+                    status_line = format_status_event(evt)
+                    if evt.final:
+                        live.update(Text.from_markup(status_line + "\n" + "\n".join(artifact_lines)))
+                        break
                 elif isinstance(evt, TaskArtifactUpdateEvent):
-                    live.update(Text.from_markup(format_artifact_event(evt)))
+                    artifact_lines.append(format_artifact_event(evt))
+                else:
+                    artifact_lines.append(f"Unknown event: {type(evt).__name__}")
+
+                live.update(Text.from_markup(status_line + "\n" + "\n".join(artifact_lines)))
 
     asyncio.run(_stream())
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # get command
@@ -240,7 +249,6 @@ def get(
     else:
         display_task_info(task, color)
 
-
 # ────────────────────────────────────────────────────────────────────────────
 # cancel command
 # ────────────────────────────────────────────────────────────────────────────
@@ -257,7 +265,6 @@ def cancel(
 
     asyncio.run(A2AClient.over_http(rpc_url).cancel_task(TaskIdParams(id=id)))
     print(f"[green]Canceled task {id}[/green]")
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # watch command
@@ -288,20 +295,30 @@ def watch(
         print("[red]Specify an --id or --text[/red]")
         return
 
+    # ── streaming view ────────────────────────────────────────────────
     async def _run() -> None:
         from rich.live import Live
         from rich.text import Text
 
         console = Console()
+        status_line = ""
+        artifact_lines: list[str] = []
+
         with Live("", refresh_per_second=4, console=console) as live:
             async for evt in stream:
                 if isinstance(evt, TaskStatusUpdateEvent):
-                    live.update(Text.from_markup(format_status_event(evt)))
+                    status_line = format_status_event(evt)
+                    if evt.final:
+                        live.update(Text.from_markup(status_line + "\n" + "\n".join(artifact_lines)))
+                        break
                 elif isinstance(evt, TaskArtifactUpdateEvent):
-                    live.update(Text.from_markup(format_artifact_event(evt)))
+                    artifact_lines.append(format_artifact_event(evt))
+                else:
+                    artifact_lines.append(f"Unknown event: {type(evt).__name__}")
+
+                live.update(Text.from_markup(status_line + "\n" + "\n".join(artifact_lines)))
 
     asyncio.run(_run())
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # chat shortcut
@@ -313,9 +330,8 @@ def chat(
 ):
     asyncio.run(handle_chat_mode(server, os.path.expanduser(config_file), CLI_SESSION_ID))
 
-
 # ────────────────────────────────────────────────────────────────────────────
-# stdio (JSON-RPC over stdin/stdout) - mostly for chaining
+# stdio (JSON-RPC over stdin/stdout) – mostly for chaining
 # ────────────────────────────────────────────────────────────────────────────
 @app.command()
 def stdio():
@@ -328,7 +344,6 @@ def stdio():
             ...
 
     asyncio.run(_run())
-
 
 # ────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
