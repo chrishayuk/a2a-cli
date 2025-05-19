@@ -5,33 +5,36 @@ Task-management slash-commands for the interactive A2A CLI.
 
 Implemented commands
 ────────────────────
-/send                → fire-and-forget task
-/send_subscribe      → send + live stream     (alias: /sendsubscribe, /watch_text)
-/get                 → fetch a task by id
-/cancel              → cancel a running task
-/resubscribe         → re-attach to a task’s stream (alias: /watch)
-/artifacts           → browse / dump artifacts collected in this session
+/send                 – fire-and-forget task (text)
+/send_subscribe       – send + live-stream reply               (aliases: /watch_text, /sendsubscribe)
+/send_image           – send a local PNG/JPEG and live-stream  (NEW!)
+/get                  – fetch a task by id
+/cancel               – cancel a running task
+/resubscribe          – re-attach to a task’s stream           (alias: /watch)
+/artifacts            – browse / dump artifacts collected in this session
 
 May 2025 highlights
 ───────────────────
-* Every TaskSendParams now carries the session-id that the CLI generated at
-  start-up so the server can thread a true conversation.
-* Live streaming restores the **pretty green “Artifact:” panels**: each artifact
-  appears immediately without erasing the status line.
-* New `/artifacts` command:
-    • `/artifacts`          – list all artifacts (with a Rich table)  
-    • `/artifacts 3`        – pretty-print artifact #3  
-    • `/artifacts 3 save`   – write artifact #3 to a file in the CWD
+* Every task now carries the CLI’s session-id so the backend can build real
+  conversation memory.
+* Live streaming restores the green “Artifact:” panels — each artifact appears
+  immediately without erasing the status line.
+* `/artifacts` command with list / pretty-view / save.
+* **Multimodal:** image parts are rendered inline and you can send images via
+  `/send_image <path> [caption …]`.
 """
-
 from __future__ import annotations
 
+import base64
+import mimetypes
 import os
 import pathlib
+import tempfile
 import uuid
 from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict
 
-from rich import print                    # pylint: disable=redefined-builtin
+from rich import print                             # pylint: disable=redefined-builtin
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -51,14 +54,56 @@ from a2a_json_rpc.spec import (
 )
 from a2a_cli.ui.ui_helpers import (
     display_task_info,
-    format_artifact_event,           # used for final summaries
+    format_artifact_event,
     format_status_event,
 )
+from a2a_cli.ui.ansi_preview import render_img   # <— new import
+
+try:
+    # Newer a2a_json_rpc already exports BinaryPart; just forward-import it.
+    from a2a_json_rpc.spec import BinaryPart          # noqa: F401
+
+except ImportError:                                   # pre-0.11 → make our own
+    @dataclass
+    class BinaryPart:                                 # type: ignore[override]
+        """
+        Minimal stand-in for a2a_json_rpc.spec.BinaryPart.
+
+        Attributes
+        ----------
+        type        fixed value ``"binary"`` (kept for wire-compat).
+        mime_type   full MIME type (``image/png``, ``audio/wav`` …).
+        data        raw payload bytes.
+        """
+
+        mime_type: str
+        data: bytes
+        type: str = "binary"                          # wire-format discriminator
+
+        # --- helpers so existing code that expects a Pydantic model still works --
+
+        def model_dump(self, *_, **__) -> Dict[str, Any]:         # Pydantic 1.x API
+            return asdict(self)
+
+        def dict(self, *_, **__) -> Dict[str, Any]:               # many libraries use this
+            return asdict(self)
+
+        # make the object indexable like a Mapping if someone does .get("mime_type")
+        def __getitem__(self, item):                              # noqa: Dunder
+            return getattr(self, item)
+
+        # readable repr for logging / debugging
+        def __repr__(self) -> str:                                # noqa: Dunder
+            size = len(self.data)
+            return f"BinaryPart(mime_type={self.mime_type!r}, bytes={size})"
+        
+# ------------------------------------------------------------------------
 
 # ════════════════════════════════════════════════════════════════════════════
-# helper – remember every artifact so /artifacts can use them
+# small helpers
 # ════════════════════════════════════════════════════════════════════════════
-def _cache_artifact(ctx: Dict[str, Any], task_id: str, art) -> None:          # noqa: ANN401
+def _cache_artifact(ctx: Dict[str, Any], task_id: str, art) -> None:  # noqa: ANN401
+    """Remember *art* in context so `/artifacts` can find it."""
     ctx.setdefault("artifact_index", []).append(
         {
             "artifact": art,
@@ -69,26 +114,66 @@ def _cache_artifact(ctx: Dict[str, Any], task_id: str, art) -> None:          # 
     )
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# helper – pretty-print ONE artifact (only text-parts are shown)
-# ════════════════════════════════════════════════════════════════════════════
-def _display_artifact(artifact: Any, console: Console | None = None) -> None:  # noqa: ANN401
+def _make_image_part(path: str) -> BinaryPart:
+    """
+    Read *path* and return a BinaryPart whose `data` field is **base-64 text**
+    so the JSON encoder can transmit it safely.
+    """
+    fp = pathlib.Path(path).expanduser().resolve()
+    if not fp.is_file():
+        raise FileNotFoundError(fp)
+
+    raw  = fp.read_bytes()
+    b64  = base64.b64encode(raw).decode("ascii")        # ← utf-8 friendly
+    mime, _ = mimetypes.guess_type(fp.name)
+    if not mime or not mime.startswith("image/"):
+        raise ValueError("Only PNG/JPEG images are supported")
+
+    return BinaryPart(mime_type=mime, data=b64)         # <── b64 text here
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# artifact display helpers
+# ═══════════════════════════════════════════════════════════════════════════
+def _display_artifact(artifact: Any, console: Console | None = None) -> None:
+    """Pretty-print one artifact (inline ANSI image or text)."""
     if console is None:
         console = Console()
+
     title = f"Artifact: {getattr(artifact, 'name', None) or '<unnamed>'}"
-    for part in getattr(artifact, "parts", []):
+
+    for part in getattr(artifact, "parts", []) or []:
+
+        # ── image preview ────────────────────────────────────────────────
+        if getattr(part, "mime_type", "").startswith("image/"):
+            raw: bytes | str = getattr(part, "data", b"")
+            if isinstance(raw, str):                     # base-64 on the wire
+                try:
+                    raw = base64.b64decode(raw)
+                except Exception:                        # pragma: no cover
+                    raw = b""
+            img_txt = render_img(raw, part.mime_type, max_width=40)
+            if img_txt:
+                console.print(
+                    Panel(Text.from_ansi(img_txt), title=title,
+                          border_style="green", padding=0)
+                )
+                return
+
+        # ── plain-text preview ───────────────────────────────────────────
         text = getattr(part, "text", None)
-        if text is None and hasattr(part, "model_dump"):                      # custom part
+        if text is None and hasattr(part, "model_dump"):
             dumped = part.model_dump()
             if isinstance(dumped, dict):
                 text = dumped.get("text")
         if text:
             console.print(Panel(text, title=title, border_style="green"))
             return
-    console.print(Panel("[no displayable text]", title=title, border_style="green"))
 
+    console.print(Panel("[no displayable preview]", title=title,
+                        border_style="green"))
 
-def _display_artifacts(task: Any, console: Console | None = None) -> None:     # noqa: ANN401
+def _display_artifacts(task: Any, console: Console | None = None) -> None:  # noqa: ANN401
     if console is None:
         console = Console()
     for art in getattr(task, "artifacts", []) or []:
@@ -96,7 +181,7 @@ def _display_artifacts(task: Any, console: Console | None = None) -> None:     #
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# /artifacts  ─ list, view or save artifacts
+# /artifacts  – list / view / save
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_artifacts(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     store: List[Dict[str, Any]] = context.get("artifact_index", [])
@@ -104,52 +189,52 @@ async def cmd_artifacts(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
         print("No artifacts collected in this session yet.")
         return True
 
-    # no extra arg → render table
+    # list table -------------------------------------------------------------
     if len(cmd_parts) == 1:
-        table = Table(title=f"Artifacts ({len(store)})", title_style="cyan", box=None)
-        table.add_column("#", justify="right")
-        table.add_column("Task ID", overflow="fold")
+        table = Table(title=f"Artifacts ({len(store)})", title_style="bold cyan")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Task-ID", overflow="fold")
         table.add_column("Name")
         table.add_column("MIME")
-        for idx, meta in enumerate(store, start=1):
-            table.add_row(str(idx), meta["task_id"][:8] + "…", meta["name"], meta["mime"])
-        console = Console()
-        console.print(table)
+        for i, meta in enumerate(store, start=1):
+            table.add_row(str(i), meta["task_id"][:8] + "…", meta["name"], meta["mime"])
+        Console().print(table)
         return True
 
-    # try to parse an index
+    # parse index ------------------------------------------------------------
     try:
-        index = int(cmd_parts[1])
+        idx = int(cmd_parts[1])
     except ValueError:
         print("[yellow]Usage: /artifacts [n] [save][/yellow]")
         return True
 
-    if index < 1 or index > len(store):
-        print(f"[red]Invalid index {index}. Use /artifacts to list.[/red]")
+    if idx < 1 or idx > len(store):
+        print(f"[red]Invalid index {idx}. Use /artifacts to list.[/red]")
         return True
 
-    meta = store[index - 1]
+    meta = store[idx - 1]
     artifact = meta["artifact"]
 
+    # save to disk -----------------------------------------------------------
     if len(cmd_parts) == 3 and cmd_parts[2].lower() == "save":
-        filename = _make_filename(meta, index)
+        filename = _make_filename(meta, idx)
         _save_artifact(artifact, filename)
-        print(f"[green]Saved #{index} → {filename}[/green]")
-    else:
-        _display_artifact(artifact)
+        print(f"[green]Saved #{idx} → {filename}[/green]")
+        return True
 
+    # pretty-print the artifact ---------------------------------------------
+    _display_artifact(artifact)
     return True
 
 
 def _make_filename(meta: Dict[str, Any], idx: int) -> str:
-    """Generate a friendly filename for the artifact."""
-    name = meta["name"] or "artifact"
-    name = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[:32]
-    ext  = _guess_extension(meta["mime"])
-    return f"{idx:03d}_{name}{ext}"
+    base = "".join(c if c.isalnum() or c in "._-" else "_" for c in meta["name"]) or "artifact"
+    base = base[:32]
+    ext = _guess_ext(meta["mime"])
+    return f"{idx:03d}_{base}{ext}"
 
 
-def _guess_extension(mime: str) -> str:
+def _guess_ext(mime: str) -> str:
     if mime.startswith("text/"):
         return ".txt"
     if mime in ("image/png", "image/x-png"):
@@ -161,24 +246,20 @@ def _guess_extension(mime: str) -> str:
     return ".bin"
 
 
-def _save_artifact(artifact: Any, filename: str) -> None:                      # noqa: ANN401
+def _save_artifact(artifact: Any, filename: str) -> None:  # noqa: ANN401
     path = pathlib.Path(filename).expanduser().resolve()
-    data_written = False
     for part in getattr(artifact, "parts", []):
         if hasattr(part, "text"):
             path.write_text(part.text)
-            data_written = True
-            break
+            return
         if hasattr(part, "data"):
             path.write_bytes(part.data)  # type: ignore[arg-type]
-            data_written = True
-            break
-    if not data_written:  # fallback
-        path.write_text("<unserialisable artifact>")
+            return
+    path.write_text("<unserialisable artifact>")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# /send – plain send, no streaming
+# /send (text, no streaming)
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_send(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     if len(cmd_parts) < 2:
@@ -212,7 +293,7 @@ async def cmd_send(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# /get – fetch existing task
+# /get
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_get(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     client: A2AClient | None = context.get("client")
@@ -222,17 +303,17 @@ async def cmd_get(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
 
     task_id = cmd_parts[1] if len(cmd_parts) > 1 else context.get("last_task_id")
     if not task_id:
-        print("[yellow]No task ID given & no previous task.[/yellow]")
+        print("[yellow]No task ID given.[/yellow]")
         return True
 
     task = await client.get_task(TaskQueryParams(id=task_id))
     console = Console()
     display_task_info(task, console=console)
 
-    if getattr(task, "status", None) and task.status.message and task.status.message.parts:
-        texts = [p.text for p in task.status.message.parts if getattr(p, "text", None)]
-        if texts:
-            console.print(Panel("\n".join(texts), title="Task Message", border_style="blue"))
+    if task.status and task.status.message and task.status.message.parts:
+        txts = [p.text for p in task.status.message.parts if getattr(p, "text", None)]
+        if txts:
+            console.print(Panel("\n".join(txts), title="Task Message", border_style="blue"))
 
     if getattr(task, "artifacts", None):
         print(f"\n[bold]Artifacts ({len(task.artifacts)}):[/bold]")
@@ -262,7 +343,7 @@ async def cmd_cancel(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# /resubscribe – improved streaming (pretty artifacts)
+# /resubscribe – streaming with pretty artifacts
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_resubscribe(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     client: A2AClient | None = context.get("streaming_client") or context.get("client")
@@ -293,8 +374,8 @@ async def cmd_resubscribe(cmd_parts: List[str], context: Dict[str, Any]) -> bool
                         break
 
                 elif isinstance(evt, TaskArtifactUpdateEvent):
-                    live.refresh()                            # flush frame
-                    _display_artifact(evt.artifact, console)  # immediate pretty panel
+                    live.refresh()
+                    _display_artifact(evt.artifact, console)
                     live.update(Text.from_markup(status_line))
                     all_artifacts.append(evt.artifact)
                     _cache_artifact(context, task_id, evt.artifact)
@@ -313,17 +394,68 @@ async def cmd_resubscribe(cmd_parts: List[str], context: Dict[str, Any]) -> bool
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# /send_subscribe – send + live stream (pretty artifacts)
+# /send_subscribe (text)  – streaming with pretty artifacts
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_send_subscribe(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     if len(cmd_parts) < 2:
         print("[yellow]Usage: /send_subscribe <text>[/yellow]")
         return True
+    text = " ".join(cmd_parts[1:])
+    return await _send_and_stream(
+        context,
+        message_parts=[TextPart(type="text", text=text)],
+    )
 
-    # ensure clients --------------------------------------------------------
+
+# ────────────────────────────────────────────────────────────────────────────
+# /send_image  –  send a local image (+ optional caption) and stream reply
+# ────────────────────────────────────────────────────────────────────────────
+async def cmd_send_image(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
+    """
+    /send_image <path.[png|jpg]>  [optional caption ...]
+
+    • Reads the file, wraps it in a BinaryPart (base-64 payload when we’re on
+      the compatibility shim).
+    • Guarantees there’s at least ONE TextPart – the user caption or the
+      placeholder “<image>” – so every back-end handler that requires text
+      will be happy.
+    • Immediately streams the response just like /send_subscribe.
+    """
+    if len(cmd_parts) < 2:
+        print("[yellow]Usage: /send_image <path> [caption][/yellow]")
+        return True
+
+    img_path = pathlib.Path(cmd_parts[1]).expanduser()
+    if not img_path.exists():
+        print(f"[red]File not found: {img_path}[/red]")
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Build message parts
+    # ------------------------------------------------------------------ #
+    try:
+        img_part = _make_image_part(str(img_path))       # BinaryPart (b64 payload on shim)
+    except Exception as exc:                             # noqa: BLE001
+        print(f"[red]Cannot read image: {exc}[/red]")
+        return True
+
+    caption = " ".join(cmd_parts[2:]) if len(cmd_parts) > 2 else "<image>"
+    message_parts: List[Any] = [
+        img_part,
+        TextPart(type="text", text=caption),             # <-- guarantees a text part
+    ]
+
+    # ------------------------------------------------------------------ #
+    # Re-use the generic send-and-stream helper
+    # ------------------------------------------------------------------ #
+    return await _send_and_stream(context, message_parts=message_parts)
+
+# ════════════════════════════════════════════════════════════════════════════
+# helper – common “send + stream” implementation used by text & image
+# ════════════════════════════════════════════════════════════════════════════
+async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any]) -> bool:
     base_url = context.get("base_url", "http://localhost:8000")
-    rpc_url = f"{base_url.rstrip('/')}/rpc"
-    events_url = f"{base_url.rstrip('/')}/events"
+    rpc_url, events_url = (f"{base_url.rstrip('/')}/{s}" for s in ("rpc", "events"))
 
     http_client: A2AClient | None = context.get("client")
     if http_client is None:
@@ -335,12 +467,11 @@ async def cmd_send_subscribe(cmd_parts: List[str], context: Dict[str, Any]) -> b
         sse_client = A2AClient.over_sse(rpc_url, events_url)
         context["streaming_client"] = sse_client
 
-    # params ----------------------------------------------------------------
     task_id = uuid.uuid4().hex
     params = TaskSendParams(
         id=task_id,
         session_id=context.get("session_id"),
-        message=Message(role="user", parts=[TextPart(type="text", text=" ".join(cmd_parts[1:]))]),
+        message=Message(role="user", parts=message_parts),
     )
     context["last_task_id"] = task_id
 
@@ -348,7 +479,6 @@ async def cmd_send_subscribe(cmd_parts: List[str], context: Dict[str, Any]) -> b
     print(f"[dim]Sending {task_id}…[/dim]")
     task = await http_client.send_task(params)
     display_task_info(task)
-
     print("[dim]Streaming updates … Ctrl-C to stop[/dim]")
 
     status_line = ""
@@ -369,7 +499,6 @@ async def cmd_send_subscribe(cmd_parts: List[str], context: Dict[str, Any]) -> b
                     live.refresh()
                     _display_artifact(evt.artifact, console)
                     live.update(Text.from_markup(status_line))
-
                     all_artifacts.append(evt.artifact)
                     _cache_artifact(context, task_id, evt.artifact)
 
@@ -385,14 +514,9 @@ async def cmd_send_subscribe(cmd_parts: List[str], context: Dict[str, Any]) -> b
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# helpers – common stream summariser
+# stream-summary helper
 # ════════════════════════════════════════════════════════════════════════════
-def _finalise_stream(
-    console: Console,
-    task_id: str,
-    final_status,
-    artifacts: List[Any],
-) -> None:
+def _finalise_stream(console: Console, task_id: str, final_status, artifacts) -> None:  # noqa: ANN001
     if final_status:
         print(f"[green]Task {task_id} completed.[/green]")
         if final_status.message and final_status.message.parts:
@@ -413,6 +537,7 @@ register_command("/get",             cmd_get)
 register_command("/cancel",          cmd_cancel)
 register_command("/resubscribe",     cmd_resubscribe)
 register_command("/send_subscribe",  cmd_send_subscribe)
+register_command("/send_image",      cmd_send_image)
 register_command("/artifacts",       cmd_artifacts)
 
 # legacy aliases
