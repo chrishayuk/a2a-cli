@@ -450,9 +450,6 @@ async def cmd_send_image(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     # ------------------------------------------------------------------ #
     return await _send_and_stream(context, message_parts=message_parts)
 
-# ════════════════════════════════════════════════════════════════════════════
-# helper – common “send + stream” implementation used by text & image
-# ════════════════════════════════════════════════════════════════════════════
 async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any]) -> bool:
     base_url = context.get("base_url", "http://localhost:8000")
     rpc_url, events_url = (f"{base_url.rstrip('/')}/{s}" for s in ("rpc", "events"))
@@ -467,40 +464,123 @@ async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any])
         sse_client = A2AClient.over_sse(rpc_url, events_url)
         context["streaming_client"] = sse_client
 
-    task_id = uuid.uuid4().hex
+    # Client-generated task ID
+    client_task_id = uuid.uuid4().hex
     params = TaskSendParams(
-        id=task_id,
+        id=client_task_id,
         session_id=context.get("session_id"),
         message=Message(role="user", parts=message_parts),
     )
-    context["last_task_id"] = task_id
-
+    
     console = Console()
-    print(f"[dim]Sending {task_id}…[/dim]")
+    print(f"[dim]Sending {client_task_id}…[/dim]")
+    
+    # Send task and get server response
     task = await http_client.send_task(params)
+    
+    # Get the server-assigned task ID 
+    server_task_id = getattr(task, "id", client_task_id)
+    
+    # Store the server ID for future reference
+    context["last_task_id"] = server_task_id
+    
     display_task_info(task)
     print("[dim]Streaming updates … Ctrl-C to stop[/dim]")
 
     status_line = ""
     all_artifacts: List[Any] = []
     final_status = None
+    
+    # Track response artifacts
+    artifact_contents = {}  # key: artifact_name, value: content
+    seen_artifacts = set()  # To track which artifacts we've seen
 
     try:
-        with Live("", refresh_per_second=4, console=console) as live:
+        from rich.console import Group
+        
+        with Live("", refresh_per_second=10, console=console) as live:
             async for evt in sse_client.send_subscribe(params):
                 if isinstance(evt, TaskStatusUpdateEvent):
                     status_line = format_status_event(evt)
-                    live.update(Text.from_markup(status_line))
+                    
+                    # Create display with status line and all current artifact panels
+                    display_parts = [Text.from_markup(status_line)]
+                    
+                    # Add panels for all response artifacts we're tracking
+                    for name, content in artifact_contents.items():
+                        display_parts.append(
+                            Panel(
+                                content,
+                                title=f"Artifact: {name}",
+                                border_style="green"
+                            )
+                        )
+                    
+                    # Update the display
+                    live.update(Group(*display_parts))
+                    
                     if evt.final:
                         final_status = evt.status
                         break
 
                 elif isinstance(evt, TaskArtifactUpdateEvent):
-                    live.refresh()
-                    _display_artifact(evt.artifact, console)
-                    live.update(Text.from_markup(status_line))
-                    all_artifacts.append(evt.artifact)
-                    _cache_artifact(context, task_id, evt.artifact)
+                    artifact = evt.artifact
+                    
+                    # Only process if it has a name and parts
+                    if hasattr(artifact, "name") and artifact.name and hasattr(artifact, "parts") and artifact.parts:
+                        # Check if it's a response artifact or something we want to show inline
+                        is_response_artifact = "_response" in artifact.name
+                        
+                        # Extract content
+                        content = _extract_content(artifact)
+                        
+                        if is_response_artifact:
+                            # Update our tracking dictionary for response artifacts
+                            artifact_contents[artifact.name] = content
+                            
+                            # Create an updated display with all current artifacts
+                            display_parts = [Text.from_markup(status_line)]
+                            for name, content in artifact_contents.items():
+                                display_parts.append(
+                                    Panel(
+                                        content,
+                                        title=f"Artifact: {name}",
+                                        border_style="green"
+                                    )
+                                )
+                            
+                            # Update the live display
+                            live.update(Group(*display_parts))
+                        else:
+                            # For non-response artifacts (images, data, etc.)
+                            # Only display them once
+                            if artifact.name not in seen_artifacts:
+                                seen_artifacts.add(artifact.name)
+                                
+                                # Temporarily stop Live display to show the artifact
+                                live.stop()
+                                _display_artifact(artifact, console)
+                                live.start()
+                                
+                                # Restore the combined view afterward
+                                display_parts = [Text.from_markup(status_line)]
+                                for name, content in artifact_contents.items():
+                                    display_parts.append(
+                                        Panel(
+                                            content,
+                                            title=f"Artifact: {name}",
+                                            border_style="green"
+                                        )
+                                    )
+                                
+                                if display_parts:
+                                    live.update(Group(*display_parts))
+                                else:
+                                    live.update(Text.from_markup(status_line))
+                    
+                    # Track all artifacts for final display and caching
+                    all_artifacts.append(artifact)
+                    _cache_artifact(context, server_task_id, artifact)  # Use server ID for caching
 
     except KeyboardInterrupt:
         print("\n[yellow]Subscription interrupted.[/yellow]")
@@ -509,9 +589,31 @@ async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any])
         if context.get("debug_mode"):
             import traceback; traceback.print_exc()
 
-    _finalise_stream(console, task_id, final_status, all_artifacts)
+    # Format task completion message in the same style as status updates
+    # Use server_task_id for consistency with what's shown in display_task_info
+    completion_message = f"[cyan]Status:[/cyan] [green]Task {server_task_id} completed[/green]"
+    print(f"\n{completion_message}")
     return True
 
+# Helper function to extract text content from an artifact
+def _extract_content(artifact) -> str:
+    """Extract a text representation of the artifact's content for comparison."""
+    if not hasattr(artifact, "parts") or not artifact.parts:
+        return ""
+    
+    part = artifact.parts[0]
+    if hasattr(part, "text") and part.text:
+        return part.text
+    
+    # For non-text parts
+    if hasattr(part, "model_dump"):
+        dumped = part.model_dump()
+        if isinstance(dumped, dict):
+            for key in ("text", "value", "content", "data"):
+                if key in dumped and isinstance(dumped[key], str):
+                    return dumped[key]
+    
+    return str(part)  # Fallback
 
 # ════════════════════════════════════════════════════════════════════════════
 # stream-summary helper
