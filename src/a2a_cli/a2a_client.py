@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 # a2a_cli/a2a_client.py
 """
-High-level A2A client: wraps any JSON-RPC transport and provides domain-specific
-methods.
+High-level A2A client (transport-agnostic).
 
-Key changes
------------
-* Unified helper ``_coerce_stream_event`` converts raw SSE payloads into
-  ``TaskStatusUpdateEvent`` / ``TaskArtifactUpdateEvent`` instances **while
-  discarding the helper key ``type``** that the transport adds for the
-  consumer‑side router.  This prevents Pydantic validation errors and means
-  the caller always receives real spec objects.
-* Streaming loops for ``send_subscribe`` and ``resubscribe`` now use the
-  helper and are identical apart from the initial RPC call.
-* No external behaviour changes - just correct artifact handling.
+Key points
+──────────
+* `_READ_TIMEOUT_S` – set to **90 seconds**; change it once and every transport
+  inherits it.
+* Unified `_coerce_stream_event` converts raw transport payloads into real
+  `TaskStatusUpdateEvent` / `TaskArtifactUpdateEvent` instances.
 """
 
 from __future__ import annotations
@@ -21,8 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator, Dict, Type, Union
 
-# a2a_json_rpc imports
-from a2a_json_rpc.json_rpc_errors import JSONRPCError
+import httpx                             # new – for Timeout helper
+
 from a2a_json_rpc.spec import (
     Message,
     Task,
@@ -35,48 +30,56 @@ from a2a_json_rpc.spec import (
 )
 from a2a_json_rpc.transport import JSONRPCTransport
 
-# a2a cli imports
 from a2a_cli.transport.http import JSONRPCHTTPClient
 from a2a_cli.transport.sse import JSONRPCSSEClient
 from a2a_cli.transport.websocket import JSONRPCWebSocketClient
 
-# logger
 logger = logging.getLogger("a2a-cli")
 
+# ────────────────────────────────────────────────────────────────────────────
+# single source-of-truth for all network time-outs
+# ────────────────────────────────────────────────────────────────────────────
+_READ_TIMEOUT_S = 90.0        # ← bump this if your backend can stall longer
+_HTTPX_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=_READ_TIMEOUT_S,
+    write=30.0,
+    pool=10.0,
+)
 
+# ════════════════════════════════════════════════════════════════════════════
+# client
+# ════════════════════════════════════════════════════════════════════════════
 class A2AClient:
     """Agent-to-Agent high-level client (transport-agnostic)."""
 
-    # ------------------------------------------------------------------ #
-    # construction helpers                                               #
-    # ------------------------------------------------------------------ #
+    # ── construction helpers ────────────────────────────────────────────
     def __init__(self, transport: JSONRPCTransport) -> None:
         self.transport = transport
 
     @classmethod
-    def over_http(
-        cls: Type["A2AClient"], endpoint: str, timeout: float = 10.0
-    ) -> "A2AClient":
-        return cls(JSONRPCHTTPClient(endpoint, timeout=timeout))
+    def over_http(cls: Type["A2AClient"], endpoint: str) -> "A2AClient":
+        return cls(JSONRPCHTTPClient(endpoint, timeout=_HTTPX_TIMEOUT))
 
     @classmethod
-    def over_ws(
-        cls: Type["A2AClient"], url: str, timeout: float = 10.0
-    ) -> "A2AClient":
-        return cls(JSONRPCWebSocketClient(url, timeout=timeout))
+    def over_ws(cls: Type["A2AClient"], url: str) -> "A2AClient":
+        return cls(JSONRPCWebSocketClient(url, timeout=_HTTPX_TIMEOUT))
 
     @classmethod
     def over_sse(
         cls: Type["A2AClient"],
         endpoint: str,
         sse_endpoint: str | None = None,
-        timeout: float = 10.0,
     ) -> "A2AClient":
-        return cls(JSONRPCSSEClient(endpoint, sse_endpoint=sse_endpoint, timeout=timeout))
+        return cls(
+            JSONRPCSSEClient(
+                endpoint,
+                sse_endpoint=sse_endpoint,
+                timeout=_HTTPX_TIMEOUT,
+            )
+        )
 
-    # ------------------------------------------------------------------ #
-    # basic RPC wrappers                                                 #
-    # ------------------------------------------------------------------ #
+    # ── basic RPC wrappers ──────────────────────────────────────────────
     async def send_task(self, params: TaskSendParams) -> Task:
         raw = await self.transport.call(
             "tasks/send", params.model_dump(mode="json", exclude_none=True, by_alias=True)
@@ -112,57 +115,50 @@ class A2AClient:
         )
         return TaskPushNotificationConfig.model_validate(raw)
 
-    # ------------------------------------------------------------------ #
-    # helpers                                                            #
-    # ------------------------------------------------------------------ #
+    # ── helper to normalise stream events ───────────────────────────────
     @staticmethod
-    def _coerce_stream_event(evt: Dict[str, Any]) -> Union[
-        TaskStatusUpdateEvent, TaskArtifactUpdateEvent, Dict[str, Any]
-    ]:
-        """Convert raw notification dict to the appropriate spec model.
-
-        The server adds a helper field ``type`` (``status`` | ``artifact``)
-        which is *not* part of either spec model, so we drop it before
-        validating.
-        """
-        if "method" in evt and evt.get("method") == "tasks/event":
+    def _coerce_stream_event(  # noqa: D401
+        evt: Dict[str, Any]
+    ) -> Union[TaskStatusUpdateEvent, TaskArtifactUpdateEvent, Dict[str, Any]]:
+        """Convert raw transport payload to proper spec objects."""
+        # HTTP & WS transports wrap the payload: {"method":"tasks/event","params":{…}}
+        if evt.get("method") == "tasks/event":
             evt = evt["params"]
 
-        # At this point evt should be the dictionary produced in transport.http
+        # transport.http adds `type: status|artifact` – drop before validation
         if "status" in evt:
-            payload = {k: v for k, v in evt.items() if k != "type"}
-            return TaskStatusUpdateEvent.model_validate(payload)
+            return TaskStatusUpdateEvent.model_validate(
+                {k: v for k, v in evt.items() if k != "type"}
+            )
         if "artifact" in evt:
-            payload = {k: v for k, v in evt.items() if k != "type"}
-            return TaskArtifactUpdateEvent.model_validate(payload)
-        return evt  # unknown - let the caller decide
+            return TaskArtifactUpdateEvent.model_validate(
+                {k: v for k, v in evt.items() if k != "type"}
+            )
+        return evt  # unknown – let caller decide
 
-    # ------------------------------------------------------------------ #
-    # streaming helpers                                                  #
-    # ------------------------------------------------------------------ #
+    # ── streaming helpers ───────────────────────────────────────────────
     async def send_subscribe(
         self, params: TaskSendParams
     ) -> AsyncIterator[Union[TaskStatusUpdateEvent, TaskArtifactUpdateEvent]]:
-        # Initiate the merged SSE connection (first line is the RPC result)
         await self.transport.call(
-            "tasks/sendSubscribe", params.model_dump(mode="json", exclude_none=True, by_alias=True)
+            "tasks/sendSubscribe",
+            params.model_dump(mode="json", exclude_none=True, by_alias=True),
         )
-
-        async for raw_msg in self.transport.stream():
+        async for raw in self.transport.stream():
             try:
-                yield self._coerce_stream_event(raw_msg)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error("Error parsing stream event: %s", exc, exc_info=True)
-                # decide whether to swallow or re‑raise - swallow keeps the stream alive
+                yield self._coerce_stream_event(raw)
+            except Exception:      # noqa: BLE001
+                logger.exception("Failed to parse sendSubscribe event")
 
     async def resubscribe(
         self, params: TaskQueryParams
     ) -> AsyncIterator[Union[TaskStatusUpdateEvent, TaskArtifactUpdateEvent]]:
         await self.transport.call(
-            "tasks/resubscribe", params.model_dump(mode="json", exclude_none=True, by_alias=True)
+            "tasks/resubscribe",
+            params.model_dump(mode="json", exclude_none=True, by_alias=True),
         )
-        async for raw_msg in self.transport.stream():
+        async for raw in self.transport.stream():
             try:
-                yield self._coerce_stream_event(raw_msg)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error("Error parsing resubscribe event: %s", exc, exc_info=True)
+                yield self._coerce_stream_event(raw)
+            except Exception:      # noqa: BLE001
+                logger.exception("Failed to parse resubscribe event")
