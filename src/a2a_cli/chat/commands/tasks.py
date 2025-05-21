@@ -41,6 +41,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.markup import MarkupError
 
 from a2a_cli.chat.commands import register_command
 from a2a_cli.a2a_client import A2AClient
@@ -451,28 +452,34 @@ async def cmd_send_image(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     # ------------------------------------------------------------------ #
     return await _send_and_stream(context, message_parts=message_parts)
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# helper: turn any str into a safe Rich renderable (no markup parsing)
+def _safe_text(s: str) -> Text:
+    """Return ``Text`` that will never raise MarkupError."""
+    try:
+        # this succeeds for *valid* Rich markup (status lines, etc.)
+        return Text.from_markup(s)
+    except MarkupError:
+        # but if the string has stray [tags] just show it verbatim
+        return Text(s, overflow="fold")
+
+# ────────────────────────────────────────────────────────────────────────────
 async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any]) -> bool:
     """
-    Helper for /send_subscribe and /send_image.
-    Sends a task, then streams status & artifact events without upsetting Rich-Live.
+    Send a task, then live-stream its updates; immune to Rich markup errors
+    and able to recover a final summary if the SSE stream collapses.
     """
-    from rich.console import Group
+    # ── set-up clients ────────────────────────────────────────────────
+    base_url = context.get("base_url", "http://localhost:8000").rstrip("/")
+    rpc_url, events_url = f"{base_url}/rpc", f"{base_url}/events"
 
-    # ── establish clients ──────────────────────────────────────────────
-    base_url = context.get("base_url", "http://localhost:8000")
-    rpc_url, events_url = (f"{base_url.rstrip('/')}/{s}" for s in ("rpc", "events"))
+    http_client: A2AClient = context.setdefault("client", A2AClient.over_http(rpc_url))
+    sse_client: A2AClient  = context.setdefault(
+        "streaming_client", A2AClient.over_sse(rpc_url, events_url)
+    )
 
-    http_client: A2AClient | None = context.get("client")
-    if http_client is None:
-        http_client = A2AClient.over_http(rpc_url)
-        context["client"] = http_client
-
-    sse_client: A2AClient | None = context.get("streaming_client")
-    if sse_client is None:
-        sse_client = A2AClient.over_sse(rpc_url, events_url)
-        context["streaming_client"] = sse_client
-
-    # ── create & send task ─────────────────────────────────────────────
+    # ── prepare & send task ───────────────────────────────────────────
     client_task_id = uuid.uuid4().hex
     params = TaskSendParams(
         id=client_task_id,
@@ -481,86 +488,104 @@ async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any])
     )
 
     console = Console()
-    console.print(f"[dim]Sending {client_task_id}…[/dim]")
+    console.print(_safe_text(f"[dim]Sending {client_task_id}…[/dim]"))
 
     task = await http_client.send_task(params)
     server_task_id = getattr(task, "id", client_task_id)
     context["last_task_id"] = server_task_id
 
-    display_task_info(task)
-    console.print("[dim]Streaming updates … Ctrl-C to interrupt[/dim]")
+    display_task_info(task)                      # pretty initial card
+    console.print(_safe_text("[dim]Streaming updates … Ctrl-C to interrupt[/dim]"))
 
-    # ── streaming loop ────────────────────────────────────────────────
-    status_line = ""
-    response_artifacts: dict[str, str] = {}
-    seen_artifacts: set[str] = set()
+    # ── live view state ───────────────────────────────────────────────
+    status_line: str = ""
+    inline_art: dict[str, str] = {}              # name → content
+    seen_art:   set[str]  = set()                # suppress repeats
+    got_final          = False                   # flip when we see evt.final
 
+    # ── the live loop itself ──────────────────────────────────────────
     try:
         with Live("", refresh_per_second=10, console=console) as live:
             async for evt in sse_client.send_subscribe(params):
-                # ── status updates ──────────────────────────────────
+
+                # ░░ status updates ░░───────────────────────────────
                 if isinstance(evt, TaskStatusUpdateEvent):
                     status_line = format_status_event(evt)
-
-                    parts = [Text.from_markup(status_line)]
-                    for name, content in response_artifacts.items():
-                        parts.append(
-                            Panel(
-                                content,
-                                title=f"Artifact: {name}",
-                                border_style="green",
-                            )
+                    # rebuild the live renderable
+                    parts = [_safe_text(status_line)] + [
+                        Panel(
+                            _safe_text(body),
+                            title=f"Artifact: {name}",
+                            border_style="green",
                         )
+                        for name, body in inline_art.items()
+                    ]
                     live.update(Group(*parts))
-
                     if evt.final:
+                        got_final = True
                         break
 
-                # ── artifact updates ───────────────────────────────
+                # ░░ artifact updates ░░─────────────────────────────
                 elif isinstance(evt, TaskArtifactUpdateEvent):
                     art = evt.artifact
-
                     if not (art.name and art.parts):
                         continue
 
                     content = _extract_content(art)
-
-                    # inline “_response” artifacts stay inside Live panel
+                    # inline response texts
                     if "_response" in art.name:
-                        response_artifacts[art.name] = content
-                        parts = [Text.from_markup(status_line)]
-                        for name, cnt in response_artifacts.items():
-                            parts.append(
-                                Panel(
-                                    cnt,
-                                    title=f"Artifact: {name}",
-                                    border_style="green",
-                                )
+                        inline_art[art.name] = content
+                        parts = [_safe_text(status_line)] + [
+                            Panel(
+                                _safe_text(body),
+                                title=f"Artifact: {name}",
+                                border_style="green",
                             )
+                            for name, body in inline_art.items()
+                        ]
                         live.update(Group(*parts))
-
-                    # everything else is printed below the Live area once
-                    elif art.name not in seen_artifacts:
-                        seen_artifacts.add(art.name)
-                        live.console.print()  # blank line
+                    # everything else shown below exactly once
+                    elif art.name not in seen_art:
+                        seen_art.add(art.name)
+                        live.console.print()
                         _display_artifact(art, live.console)
 
                     _cache_artifact(context, server_task_id, art)
 
-    except (asyncio.CancelledError, StopAsyncIteration):
-        # graceful shutdown (Ctrl-C or stream end)
-        pass
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:                      # noqa: BLE001
         console.print(
-            f"[red]Error during streaming: {type(exc).__name__}: {exc or 'unknown'}[/red]"
+            _safe_text(
+                f"[yellow]Stream hiccup ({type(exc).__name__}) – attempting to recover…[/yellow]"
+            )
         )
-        if context.get("debug_mode"):
-            import traceback
 
-            traceback.print_exc()
+    # ── if stream died early grab the latest snapshot ────────────────
+    if not got_final:
+        try:
+            snapshot = await http_client.get_task(TaskQueryParams(id=server_task_id))
+            if snapshot.status and snapshot.status.message:
+                console.print(
+                    Panel(
+                        _safe_text("\n".join(
+                            p.text for p in snapshot.status.message.parts if getattr(p, "text", None)
+                        )),
+                        title="Latest server message",
+                        border_style="blue",
+                    )
+                )
+            for art in snapshot.artifacts or []:
+                if art.name not in seen_art:
+                    _display_artifact(art, console)
+                    _cache_artifact(context, server_task_id, art)
+        except Exception as exc:                  # noqa: BLE001
+            console.print(
+                _safe_text(
+                    f"[red]Couldn’t fetch final state ({type(exc).__name__}: {exc})[/red]"
+                )
+            )
 
     console.print(
-        f"\n[cyan]Status:[/cyan] [green]Task {server_task_id} completed[/green]"
+        _safe_text(f"\n[cyan]Status:[/cyan] [green]Task {server_task_id} completed[/green]")
     )
     return True
 
