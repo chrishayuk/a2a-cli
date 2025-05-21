@@ -3,7 +3,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "a2a-cli"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-json-rpc" },

@@ -25,6 +25,7 @@ May 2025 highlights
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import mimetypes
 import os
@@ -451,6 +452,13 @@ async def cmd_send_image(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     return await _send_and_stream(context, message_parts=message_parts)
 
 async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any]) -> bool:
+    """
+    Helper for /send_subscribe and /send_image.
+    Sends a task, then streams status & artifact events without upsetting Rich-Live.
+    """
+    from rich.console import Group
+
+    # ── establish clients ──────────────────────────────────────────────
     base_url = context.get("base_url", "http://localhost:8000")
     rpc_url, events_url = (f"{base_url.rstrip('/')}/{s}" for s in ("rpc", "events"))
 
@@ -464,135 +472,96 @@ async def _send_and_stream(context: Dict[str, Any], *, message_parts: List[Any])
         sse_client = A2AClient.over_sse(rpc_url, events_url)
         context["streaming_client"] = sse_client
 
-    # Client-generated task ID
+    # ── create & send task ─────────────────────────────────────────────
     client_task_id = uuid.uuid4().hex
     params = TaskSendParams(
         id=client_task_id,
         session_id=context.get("session_id"),
         message=Message(role="user", parts=message_parts),
     )
-    
-    console = Console()
-    print(f"[dim]Sending {client_task_id}…[/dim]")
-    
-    # Send task and get server response
-    task = await http_client.send_task(params)
-    
-    # Get the server-assigned task ID 
-    server_task_id = getattr(task, "id", client_task_id)
-    
-    # Store the server ID for future reference
-    context["last_task_id"] = server_task_id
-    
-    display_task_info(task)
-    print("[dim]Streaming updates … Ctrl-C to stop[/dim]")
 
+    console = Console()
+    console.print(f"[dim]Sending {client_task_id}…[/dim]")
+
+    task = await http_client.send_task(params)
+    server_task_id = getattr(task, "id", client_task_id)
+    context["last_task_id"] = server_task_id
+
+    display_task_info(task)
+    console.print("[dim]Streaming updates … Ctrl-C to interrupt[/dim]")
+
+    # ── streaming loop ────────────────────────────────────────────────
     status_line = ""
-    all_artifacts: List[Any] = []
-    final_status = None
-    
-    # Track response artifacts
-    artifact_contents = {}  # key: artifact_name, value: content
-    seen_artifacts = set()  # To track which artifacts we've seen
+    response_artifacts: dict[str, str] = {}
+    seen_artifacts: set[str] = set()
 
     try:
-        from rich.console import Group
-        
         with Live("", refresh_per_second=10, console=console) as live:
             async for evt in sse_client.send_subscribe(params):
+                # ── status updates ──────────────────────────────────
                 if isinstance(evt, TaskStatusUpdateEvent):
                     status_line = format_status_event(evt)
-                    
-                    # Create display with status line and all current artifact panels
-                    display_parts = [Text.from_markup(status_line)]
-                    
-                    # Add panels for all response artifacts we're tracking
-                    for name, content in artifact_contents.items():
-                        display_parts.append(
+
+                    parts = [Text.from_markup(status_line)]
+                    for name, content in response_artifacts.items():
+                        parts.append(
                             Panel(
                                 content,
                                 title=f"Artifact: {name}",
-                                border_style="green"
+                                border_style="green",
                             )
                         )
-                    
-                    # Update the display
-                    live.update(Group(*display_parts))
-                    
+                    live.update(Group(*parts))
+
                     if evt.final:
-                        final_status = evt.status
                         break
 
+                # ── artifact updates ───────────────────────────────
                 elif isinstance(evt, TaskArtifactUpdateEvent):
-                    artifact = evt.artifact
-                    
-                    # Only process if it has a name and parts
-                    if hasattr(artifact, "name") and artifact.name and hasattr(artifact, "parts") and artifact.parts:
-                        # Check if it's a response artifact or something we want to show inline
-                        is_response_artifact = "_response" in artifact.name
-                        
-                        # Extract content
-                        content = _extract_content(artifact)
-                        
-                        if is_response_artifact:
-                            # Update our tracking dictionary for response artifacts
-                            artifact_contents[artifact.name] = content
-                            
-                            # Create an updated display with all current artifacts
-                            display_parts = [Text.from_markup(status_line)]
-                            for name, content in artifact_contents.items():
-                                display_parts.append(
-                                    Panel(
-                                        content,
-                                        title=f"Artifact: {name}",
-                                        border_style="green"
-                                    )
+                    art = evt.artifact
+
+                    if not (art.name and art.parts):
+                        continue
+
+                    content = _extract_content(art)
+
+                    # inline “_response” artifacts stay inside Live panel
+                    if "_response" in art.name:
+                        response_artifacts[art.name] = content
+                        parts = [Text.from_markup(status_line)]
+                        for name, cnt in response_artifacts.items():
+                            parts.append(
+                                Panel(
+                                    cnt,
+                                    title=f"Artifact: {name}",
+                                    border_style="green",
                                 )
-                            
-                            # Update the live display
-                            live.update(Group(*display_parts))
-                        else:
-                            # For non-response artifacts (images, data, etc.)
-                            # Only display them once
-                            if artifact.name not in seen_artifacts:
-                                seen_artifacts.add(artifact.name)
-                                
-                                # Temporarily stop Live display to show the artifact
-                                live.stop()
-                                _display_artifact(artifact, console)
-                                live.start()
-                                
-                                # Restore the combined view afterward
-                                display_parts = [Text.from_markup(status_line)]
-                                for name, content in artifact_contents.items():
-                                    display_parts.append(
-                                        Panel(
-                                            content,
-                                            title=f"Artifact: {name}",
-                                            border_style="green"
-                                        )
-                                    )
-                                
-                                if display_parts:
-                                    live.update(Group(*display_parts))
-                                else:
-                                    live.update(Text.from_markup(status_line))
-                    
-                    # Track all artifacts for final display and caching
-                    all_artifacts.append(artifact)
-                    _cache_artifact(context, server_task_id, artifact)  # Use server ID for caching
+                            )
+                        live.update(Group(*parts))
 
-    except KeyboardInterrupt:
-        print("\n[yellow]Subscription interrupted.[/yellow]")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]Error during streaming: {exc}[/red]")
+                    # everything else is printed below the Live area once
+                    elif art.name not in seen_artifacts:
+                        seen_artifacts.add(art.name)
+                        live.console.print()  # blank line
+                        _display_artifact(art, live.console)
+
+                    _cache_artifact(context, server_task_id, art)
+
+    except (asyncio.CancelledError, StopAsyncIteration):
+        # graceful shutdown (Ctrl-C or stream end)
+        pass
+    except Exception as exc:  # pylint: disable=broad-except
+        console.print(
+            f"[red]Error during streaming: {type(exc).__name__}: {exc or 'unknown'}[/red]"
+        )
         if context.get("debug_mode"):
-            import traceback; traceback.print_exc()
+            import traceback
 
-    # Format task completion message in the same style as status updates
-    # Use server_task_id for consistency with what's shown in display_task_info
-    completion_message = f"[cyan]Status:[/cyan] [green]Task {server_task_id} completed[/green]"
-    print(f"\n{completion_message}")
+            traceback.print_exc()
+
+    console.print(
+        f"\n[cyan]Status:[/cyan] [green]Task {server_task_id} completed[/green]"
+    )
     return True
 
 # Helper function to extract text content from an artifact
