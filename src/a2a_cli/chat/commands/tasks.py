@@ -453,6 +453,12 @@ async def cmd_send_image(cmd_parts: List[str], context: Dict[str, Any]) -> bool:
     return await _send_and_stream(context, message_parts=message_parts)
 
 
+# ─── a2a_cli/chat/commands/tasks.py ─────────────────────────────────────────
+# … keep all the earlier imports …
+from rich.console import Group
+from rich.text import Text
+from rich.markup import MarkupError
+
 # ────────────────────────────────────────────────────────────────────────────
 # helper: turn any str into a safe Rich renderable (no markup parsing)
 def _safe_text(s: str) -> Text:
