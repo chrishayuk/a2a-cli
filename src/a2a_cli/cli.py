@@ -7,6 +7,12 @@ Provides a rich, interactive command-line interface for the Agent-to-Agent
 (A2A) protocol.  Supports sending, watching and chatting with tasks over a
 running A2A server.
 
+Compliant with A2A Protocol v0.3.0 Specification:
+- JSON-RPC 2.0 over HTTP(S) transport
+- Agent discovery via /.well-known/agent-card.json
+- Streaming and push notification support
+- Multiple transport protocols (HTTP, SSE, WebSocket, STDIO)
+
 May 2025
 ────────
 * Session persistence – a single random ``session_id`` is generated when the
@@ -15,7 +21,7 @@ May 2025
 * Cleaner logging flags (``--debug``, ``--quiet``, ``--log-level``).
 * Graceful terminal restore on Ctrl-C / signals.
 * **May 18, 2025:** streaming views now show every artifact the moment it
-  arrives (no more “last one wins”).
+  arrives (no more "last one wins").
 """
 from __future__ import annotations
 

@@ -37,8 +37,8 @@ async def fetch_agent_card(base_url: str) -> Tuple[bool, Dict[str, Any]]:
 
     # 1. Legacy draft path (kept for backward compatibility)
     legacy = f"{base_url.rstrip('/')}/agent-card.json"
-    # 2. Current spec path
-    modern = f"{base_url.rstrip('/')}/.well-known/agent.json"
+    # 2. Current spec path (A2A v0.3.0)
+    modern = f"{base_url.rstrip('/')}/.well-known/agent-card.json"
 
     async with httpx.AsyncClient() as client:
         for url in (legacy, modern):
