@@ -3,7 +3,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "a2a-cli"
-version = "0.1.11"
+version = "0.2"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-json-rpc" },
@@ -23,7 +23,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-json-rpc", specifier = ">=0.1.3" },
+    { name = "a2a-json-rpc", specifier = ">=0.3" },
     { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.9.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pillow", specifier = ">=11.2.1" },
@@ -36,15 +36,15 @@ requires-dist = [
 
 [[package]]
 name = "a2a-json-rpc"
-version = "0.1.3"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/11/6d5f680bad5b2fe3df5af20039090234b77c33748e18001ac9cc31722be5/a2a_json_rpc-0.1.3.tar.gz", hash = "sha256:db5a2dc47694c7765a438b5b229dff86c73569114780a473c790466c00e905a8", size = 15863 }
+sdist = { url = "https://files.pythonhosted.org/packages/46/55/781612aae11ecf71dd13a11ef767927230e7cf50497cb3d168fa3e245087/a2a_json_rpc-0.3.0.tar.gz", hash = "sha256:68c0cd55242cc0996e7ebf691e3f24d1d6463bbb8ded4832cc32398b26626202", size = 24536 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/dc/6252d387db886f72a6ef9a584a05de9ee2cb2cc585a55b89300bcd1281b7/a2a_json_rpc-0.1.3-py3-none-any.whl", hash = "sha256:8977bf3f3166f9c3f9a4808fc676e63c2bf8b89c10b9b214f548925a678b1f5b", size = 15165 },
+    { url = "https://files.pythonhosted.org/packages/00/09/b67082b2131f150a606fd7e4dead5cdaceed60beeea37a29c1c54b805d66/a2a_json_rpc-0.3.0-py3-none-any.whl", hash = "sha256:fc3532c7ef7c7ae951398405e65b3bd9a3e384b62e1a7a62b641f55423855c94", size = 15724 },
 ]
 
 [[package]]
