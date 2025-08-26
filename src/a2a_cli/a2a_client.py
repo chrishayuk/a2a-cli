@@ -32,6 +32,7 @@ from a2a_json_rpc.transport import JSONRPCTransport
 
 from a2a_cli.transport.http import JSONRPCHTTPClient
 from a2a_cli.transport.sse import JSONRPCSSEClient
+from a2a_cli.transport.stdio import JSONRPCStdioTransport
 from a2a_cli.transport.websocket import JSONRPCWebSocketClient
 
 logger = logging.getLogger("a2a-cli")
@@ -78,6 +79,10 @@ class A2AClient:
                 timeout=_HTTPX_TIMEOUT,
             )
         )
+
+    @classmethod
+    def over_stdio(cls: Type["A2AClient"]) -> "A2AClient":
+        return cls(JSONRPCStdioTransport())
 
     # ── basic RPC wrappers ──────────────────────────────────────────────
     async def send_task(self, params: TaskSendParams) -> Task:

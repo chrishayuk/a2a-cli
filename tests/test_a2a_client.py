@@ -43,7 +43,7 @@ async def test_send_and_get_and_cancel_task():
     transport = FakeTransport(call_return=raw_task)
     client = A2AClient(transport)
 
-    params = TaskSendParams(id="t1", message={"role": "user", "parts": []})
+    params = TaskSendParams(id="t1", session_id="test-session", message={"role": "user", "parts": []})
     task = await client.send_task(params)
     assert isinstance(task, Task)
     assert task.id == "t1"
@@ -89,7 +89,7 @@ async def test_send_subscribe_and_resubscribe_streams():
     transport = FakeTransport(call_return=None, stream_msgs=[status_msg, artifact_msg])
     client = A2AClient(transport)
 
-    params = TaskSendParams(id="t3", message={"role": "user", "parts": []})
+    params = TaskSendParams(id="t3", session_id="test-session", message={"role": "user", "parts": []})
     events = []
     async for ev in client.send_subscribe(params):
         events.append(ev)
@@ -157,7 +157,7 @@ async def test_send_subscribe_with_http_not_supported():
     mock_transport = httpx.MockTransport(handler)
     client.transport._client = httpx.AsyncClient(transport=mock_transport)
     
-    params = TaskSendParams(id="t4", message={"role": "user", "parts": []})
+    params = TaskSendParams(id="t4", session_id="test-session", message={"role": "user", "parts": []})
     with pytest.raises(NotImplementedError):
         # send_subscribe will call stream(), which HTTP transport does not support
         async for _ in client.send_subscribe(params):

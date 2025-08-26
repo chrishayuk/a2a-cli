@@ -1,6 +1,6 @@
 # A2A CLI
 
-A command-line client for the A2A (Agent-to-Agent) Protocol.
+A command-line client for the A2A (Agent-to-Agent) Protocol v0.3.0.
 
 ## Overview
 
@@ -8,12 +8,15 @@ A2A CLI provides a rich, interactive command-line interface for interacting with
 
 ## Features
 
+- **A2A Protocol v0.3.0 Compliant** - Full support for the latest specification
 - Interactive chat mode with server agents
 - Command-line interface for task management
 - Multiple transport protocols (HTTP, SSE, WebSockets, STDIO)
+- Agent discovery via `/.well-known/agent-card.json`
 - Rich text UI with streaming responses
 - Support for all A2A protocol methods
 - Configuration management for multiple servers
+- Session persistence and conversation memory
 
 ## Installation
 
