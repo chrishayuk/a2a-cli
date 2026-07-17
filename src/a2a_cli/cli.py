@@ -198,7 +198,7 @@ def send(
     try:
         task = asyncio.run(http_client.send_task(params))
         if not wait:
-            display_task_info(task, color)
+            display_task_info(task, color=color)
     except JSONRPCError as exc:
         logging.getLogger("a2a-cli").error("Send failed: %s", exc)
         raise typer.Exit(1)
@@ -251,7 +251,7 @@ def get(
 
     task = asyncio.run(A2AClient.over_http(rpc_url).get_task(TaskQueryParams(id=id)))
     if json_output:
-        print(json.dumps(task.model_dump(by_alias=True), indent=2))
+        print(json.dumps(task.model_dump(mode="json", by_alias=True), indent=2))
     else:
         display_task_info(task, color)
 
