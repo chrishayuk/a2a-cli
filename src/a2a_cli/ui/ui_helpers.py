@@ -40,7 +40,7 @@ def _extract_part_text(part: Any) -> Optional[str]:
     2. Fallback to ``model_dump()`` → ``{"text": …}`` for Pydantic types.
     """
     for attr in ("text", "value", "content", "data"):
-        txt = getattr(part, attr, None)
+        txt = getattr(part, attr, None) or (part.get(attr) if isinstance(part, dict) else None)
         if isinstance(txt, str) and txt.strip():
             return txt
 
@@ -134,8 +134,15 @@ def display_task_info(task: Any, *, color: bool = True, console: Console | None 
     if getattr(task, "artifacts", None):
         details.append("\nArtifacts:")
         for art in task.artifacts:
-            details.append(f"  • [{ARTIFACT_COLOR}]{art.name or '<unnamed>'}[/{ARTIFACT_COLOR}]")
-            for part in art.parts:
+            # Pydantic may leave artifacts as raw dicts when the field is typed Any
+            art_name = (
+                art.get("name") if isinstance(art, dict) else getattr(art, "name", None)
+            ) or "<unnamed>"
+            art_parts = (
+                art.get("parts", []) if isinstance(art, dict) else getattr(art, "parts", [])
+            ) or []
+            details.append(f"  • [{ARTIFACT_COLOR}]{art_name}[/{ARTIFACT_COLOR}]")
+            for part in art_parts:
                 snippet = _extract_part_text(part)
                 if snippet:
                     snippet = snippet[:200] + ("…" if len(snippet) > 200 else "")
